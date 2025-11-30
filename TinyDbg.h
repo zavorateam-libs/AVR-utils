@@ -33,9 +33,11 @@ static unsigned long _td_last = 0;
 static bool _td_led_on = false;
 static int _td_rem_blinks = 0;      // remaining blinks
 static bool _td_active = false;
-static const __FlashStringHelper* _TAG_LOG = F("[LOG]");
-static const __FlashStringHelper* _TAG_WARN = F("[WARN]");
-static const __FlashStringHelper* _TAG_ERR = F("[ERR]");
+
+// tags stored in PROGMEM to avoid F() global init problems on some cores
+static const char TAG_LOG[]  PROGMEM = "[LOG]";
+static const char TAG_WARN[] PROGMEM = "[WARN]";
+static const char TAG_ERR[]  PROGMEM = "[ERR]";
 
 // ----------------- API -----------------
 
@@ -52,15 +54,20 @@ static inline void DBG_begin(unsigned long baud = 115200UL) {
 // Schedule n blinks.
 // Blink is performed on TINYDBG_LED_PIN. If n <= 0, does nothing.
 // Example: B(3); // 3 quick blinks
+// Schedule n blinks **additive** (можно вызывать из loop)
 static inline void B(int n) {
   if (n <= 0) return;
   _td_pin = (uint8_t)TINYDBG_LED_PIN;
   pinMode(_td_pin, OUTPUT);
   digitalWrite(_td_pin, LOW);
-  _td_rem_blinks = n;
-  _td_led_on = false;
-  _td_last = millis();
-  _td_active = true;
+
+  // Добавляем новые мигания к текущим
+  _td_rem_blinks += n;
+  if (!_td_active) {
+    _td_led_on = false;
+    _td_last = millis();
+    _td_active = true;
+  }
 }
 
 // Must be called from loop() frequently to update blink state.
@@ -68,12 +75,10 @@ static inline void DBG_tick(void) {
   if (!_td_active) return;
   unsigned long now = millis();
   if (_td_led_on) {
-    // currently HIGH, wait ON_MS then switch off
     if (now - _td_last >= (unsigned long)TINYDBG_ON_MS) {
       digitalWrite(_td_pin, LOW);
       _td_led_on = false;
       _td_last = now;
-      // finished one blink (on->off), decrement remaining
       _td_rem_blinks--;
       if (_td_rem_blinks <= 0) {
         _td_active = false;
@@ -81,7 +86,6 @@ static inline void DBG_tick(void) {
       }
     }
   } else {
-    // currently LOW, wait OFF_MS then turn on (if blinks remain)
     if (_td_rem_blinks > 0 && now - _td_last >= (unsigned long)TINYDBG_OFF_MS) {
       digitalWrite(_td_pin, HIGH);
       _td_led_on = true;
@@ -91,60 +95,102 @@ static inline void DBG_tick(void) {
 }
 
 // ---------- minimal printing helpers (very small) ----------
-// Print tag and one or two args. To keep code tiny we accept two common types:
-//  - const char* (C-string)
-//  - long (numbers)  -- prints via Serial.print
-// You can pass a variable of another printable type; Serial.print will usually handle it.
-
-static inline void _dbg_print_tag(const __FlashStringHelper* tag) {
-  Serial.print(tag);
+// Print tag stored in PROGMEM and a space.
+static inline void _dbg_print_tag(const char* tag_progmem) {
+  // FPSTR wraps PROGMEM pointer into __FlashStringHelper*
+  Serial.print(FPSTR(tag_progmem));
   Serial.print(' ');
 }
 
-// 1 arg: const char*
-static inline void _dbg_print1(const char* a) {
+// 1 arg: const char* (RAM)
+static inline void _dbg_print1_ram(const char* a) {
+  Serial.println(a);
+}
+// 1 arg: __FlashStringHelper* (F("..."))
+static inline void _dbg_print1_flash(const __FlashStringHelper* a) {
   Serial.println(a);
 }
 // 1 arg: long
-static inline void _dbg_print1(long a) {
+static inline void _dbg_print1_long(long a) {
   Serial.println(a);
 }
+
 // 2 args: const char* + long
-static inline void _dbg_print2(const char* a, long b) {
+static inline void _dbg_print2_ram_long(const char* a, long b) {
   Serial.print(a);
   Serial.print(b);
   Serial.println();
 }
-// 2 args: long + const char*  (rare, but included)
-static inline void _dbg_print2(long a, const char* b) {
+// 2 args: __FlashStringHelper* + long
+static inline void _dbg_print2_flash_long(const __FlashStringHelper* a, long b) {
+  Serial.print(a);
+  Serial.print(b);
+  Serial.println();
+}
+// 2 args: long + const char*
+static inline void _dbg_print2_long_ram(long a, const char* b) {
   Serial.print(a);
   Serial.print(' ');
   Serial.println(b);
 }
 // 2 args: const char* + const char*
-static inline void _dbg_print2(const char* a, const char* b) {
+static inline void _dbg_print2_ram_ram(const char* a, const char* b) {
+  Serial.print(a);
+  Serial.print(b);
+  Serial.println();
+}
+// 2 args: __FlashStringHelper* + const char*
+static inline void _dbg_print2_flash_ram(const __FlashStringHelper* a, const char* b) {
+  Serial.print(a);
+  Serial.print(b);
+  Serial.println();
+}
+// 2 args: const char* + __FlashStringHelper*
+static inline void _dbg_print2_ram_flash(const char* a, const __FlashStringHelper* b) {
   Serial.print(a);
   Serial.print(b);
   Serial.println();
 }
 
 // Public logger overloads (small set to cover most cases).
-// 1-arg variants:
-static inline void log(const char* a)      { _dbg_print_tag(_TAG_LOG); _dbg_print1(a); }
-static inline void warn(const char* a)     { _dbg_print_tag(_TAG_WARN); _dbg_print1(a); }
-static inline void err(const char* a)      { _dbg_print_tag(_TAG_ERR); _dbg_print1(a); }
+// 1-arg variants (RAM)
+static inline void log(const char* a)    { _dbg_print_tag(TAG_LOG); _dbg_print1_ram(a); }
+static inline void warn(const char* a)   { _dbg_print_tag(TAG_WARN); _dbg_print1_ram(a); }
+static inline void err(const char* a)    { _dbg_print_tag(TAG_ERR); _dbg_print1_ram(a); }
 
-static inline void log(long a)             { _dbg_print_tag(_TAG_LOG); _dbg_print1(a); }
-static inline void warn(long a)            { _dbg_print_tag(_TAG_WARN); _dbg_print1(a); }
-static inline void err(long a)             { _dbg_print_tag(_TAG_ERR); _dbg_print1(a); }
+// 1-arg variants (flash F(""))
+static inline void log(const __FlashStringHelper* a)  { _dbg_print_tag(TAG_LOG); _dbg_print1_flash(a); }
+static inline void warn(const __FlashStringHelper* a) { _dbg_print_tag(TAG_WARN); _dbg_print1_flash(a); }
+static inline void err(const __FlashStringHelper* a)  { _dbg_print_tag(TAG_ERR); _dbg_print1_flash(a); }
+
+// 1-arg variants (number)
+static inline void log(long a)           { _dbg_print_tag(TAG_LOG); _dbg_print1_long(a); }
+static inline void warn(long a)          { _dbg_print_tag(TAG_WARN); _dbg_print1_long(a); }
+static inline void err(long a)           { _dbg_print_tag(TAG_ERR); _dbg_print1_long(a); }
 
 // 2-arg variants: (text, number) or (text, text)
-static inline void log(const char* a, long b)  { _dbg_print_tag(_TAG_LOG); _dbg_print2(a,b); }
-static inline void warn(const char* a, long b) { _dbg_print_tag(_TAG_WARN); _dbg_print2(a,b); }
-static inline void err(const char* a, long b)  { _dbg_print_tag(_TAG_ERR); _dbg_print2(a,b); }
+static inline void log(const char* a, long b)  { _dbg_print_tag(TAG_LOG); _dbg_print2_ram_long(a,b); }
+static inline void warn(const char* a, long b) { _dbg_print_tag(TAG_WARN); _dbg_print2_ram_long(a,b); }
+static inline void err(const char* a, long b)  { _dbg_print_tag(TAG_ERR); _dbg_print2_ram_long(a,b); }
 
-static inline void log(const char* a, const char* b)  { _dbg_print_tag(_TAG_LOG); _dbg_print2(a,b); }
-static inline void warn(const char* a, const char* b) { _dbg_print_tag(_TAG_WARN); _dbg_print2(a,b); }
-static inline void err(const char* a, const char* b)  { _dbg_print_tag(_TAG_ERR); _dbg_print2(a,b); }
+static inline void log(const __FlashStringHelper* a, long b)  { _dbg_print_tag(TAG_LOG); _dbg_print2_flash_long(a,b); }
+static inline void warn(const __FlashStringHelper* a, long b) { _dbg_print_tag(TAG_WARN); _dbg_print2_flash_long(a,b); }
+static inline void err(const __FlashStringHelper* a, long b)  { _dbg_print_tag(TAG_ERR); _dbg_print2_flash_long(a,b); }
 
-#endif // TINYDBG_H
+static inline void log(long a, const char* b)  { _dbg_print_tag(TAG_LOG); _dbg_print2_long_ram(a,b); }
+static inline void warn(long a, const char* b) { _dbg_print_tag(TAG_WARN); _dbg_print2_long_ram(a,b); }
+static inline void err(long a, const char* b)  { _dbg_print_tag(TAG_ERR); _dbg_print2_long_ram(a,b); }
+
+static inline void log(const char* a, const char* b)  { _dbg_print_tag(TAG_LOG); _dbg_print2_ram_ram(a,b); }
+static inline void warn(const char* a, const char* b) { _dbg_print_tag(TAG_WARN); _dbg_print2_ram_ram(a,b); }
+static inline void err(const char* a, const char* b)  { _dbg_print_tag(TAG_ERR); _dbg_print2_ram_ram(a,b); }
+
+static inline void log(const __FlashStringHelper* a, const char* b)  { _dbg_print_tag(TAG_LOG); _dbg_print2_flash_ram(a,b); }
+static inline void warn(const __FlashStringHelper* a, const char* b) { _dbg_print_tag(TAG_WARN); _dbg_print2_flash_ram(a,b); }
+static inline void err(const __FlashStringHelper* a, const char* b)  { _dbg_print_tag(TAG_ERR); _dbg_print2_flash_ram(a,b); }
+
+static inline void log(const char* a, const __FlashStringHelper* b)  { _dbg_print_tag(TAG_LOG); _dbg_print2_ram_flash(a,b); }
+static inline void warn(const char* a, const __FlashStringHelper* b) { _dbg_print_tag(TAG_WARN); _dbg_print2_ram_flash(a,b); }
+static inline void err(const char* a, const __FlashStringHelper* b)  { _dbg_print_tag(TAG_ERR); _dbg_print2_ram_flash(a,b); }
+
+#endif
